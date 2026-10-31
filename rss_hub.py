@@ -93,13 +93,14 @@ def page_title(link):
     return link.rstrip("/").rsplit("/", 1)[-1].replace("-", " ").capitalize()
 
 
-def send_telegram(text):
+def send_telegram(text, thread_id=None):
+    """thread_id: group topic to post in; defaults to TELEGRAM_THREAD_ID."""
+    thread_id = str(thread_id or os.environ.get("TELEGRAM_THREAD_ID", "")).strip()
     if os.environ.get("DRY_RUN") == "1":
-        print("[dry run]", text.replace("\n", " | "))
+        print(f"[dry run, topic {thread_id or '-'}]", text.replace("\n", " | "))
         return
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     payload = {"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text, "parse_mode": "HTML"}
-    thread_id = os.environ.get("TELEGRAM_THREAD_ID", "").strip()
     if thread_id:
         payload["message_thread_id"] = int(thread_id)
     for _ in range(3):
@@ -142,12 +143,18 @@ def load_dotenv():
 
 def main():
     load_dotenv()
+    sources = yaml.safe_load(SOURCES_FILE.read_text(encoding="utf-8"))["sources"]
+
     if "--test" in sys.argv:
-        send_telegram("✅ RSS Hub test message. If you see this in the right topic, setup is correct.")
-        print("Test message sent.")
+        # One test message per topic in use, naming the sources that post there.
+        topics = {}
+        for source in sources:
+            topics.setdefault(source.get("topic_id"), []).append(source["name"])
+        for topic_id, names in topics.items():
+            send_telegram(f"✅ RSS Hub test. This topic will receive: {', '.join(names)}", topic_id)
+            print(f"Test message sent for: {', '.join(names)}")
         return
 
-    sources = yaml.safe_load(SOURCES_FILE.read_text(encoding="utf-8"))["sources"]
     seen = load_seen()
     now = datetime.now(timezone.utc).isoformat()
     source_failures = 0
@@ -199,7 +206,7 @@ def main():
                 f'<a href="{html.escape(item["link"], quote=True)}">Read more</a>'
             )
             try:
-                send_telegram(text)
+                send_telegram(text, source.get("topic_id"))
                 source_seen[item["id"]] = now
             except requests.RequestException as exc:
                 # Left unmarked, so it is retried next run.
