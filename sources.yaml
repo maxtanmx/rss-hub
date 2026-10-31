@@ -26,6 +26,11 @@ sources:
     type: rss
     url: https://news.google.com/rss/search?q=site:reuters.com+when:1d&hl=en-SG&gl=SG&ceid=SG:en
     strip_title_suffix: ' - Reuters'
+    # Reuters pages block automated readers, so these posts have no photo or summary.
+    fetch_page: false
+    summary: false
+    author: Reuters
+    domain: reuters.com
 
   - name: Yahoo Finance SG
     type: rss

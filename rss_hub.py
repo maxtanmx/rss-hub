@@ -17,7 +17,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import feedparser
 import requests
@@ -49,6 +49,11 @@ def fetch(url):
     return resp
 
 
+def clean_text(raw):
+    """Strip HTML tags and entities from a feed summary."""
+    return " ".join(BeautifulSoup(raw or "", "html.parser").get_text(" ").split())
+
+
 def items_from_rss(source):
     feed = feedparser.parse(fetch(source["url"]).content)
     suffix = source.get("strip_title_suffix")
@@ -60,7 +65,19 @@ def items_from_rss(source):
             continue
         if suffix and title.endswith(suffix):
             title = title[: -len(suffix)].strip()
-        items.append({"id": entry.get("id") or link, "title": title, "link": link})
+        published = entry.get("published_parsed") or entry.get("updated_parsed")
+        media = entry.get("media_content") or entry.get("media_thumbnail") or []
+        images = [m["url"] for m in media if m.get("url")]
+        images += [e["href"] for e in entry.get("enclosures", []) if e.get("type", "").startswith("image")]
+        items.append({
+            "id": entry.get("id") or link,
+            "title": title,
+            "link": link,
+            "summary": clean_text(entry.get("summary")) if source.get("summary", True) else "",
+            "author": entry.get("author") or (entry.get("source") or {}).get("title", ""),
+            "published": datetime(*published[:6], tzinfo=timezone.utc) if published else None,
+            "image": images[0] if images else "",
+        })
     return items
 
 
@@ -79,41 +96,135 @@ def items_from_scrape(source):
     return [{"id": link, "title": title, "link": link} for link, title in titles.items()]
 
 
-def page_title(link):
-    """Read the real headline from an article page (used when the link text is empty)."""
+def page_meta(link):
+    """Read headline, summary, image, author and date from an article page's meta tags."""
     try:
         soup = BeautifulSoup(fetch(link).text, "html.parser")
-        tag = soup.find("meta", property="og:title")
-        if tag and tag.get("content"):
-            return tag["content"].strip()
-        if soup.title and soup.title.string:
-            return soup.title.string.strip()
     except requests.RequestException:
-        pass
-    return link.rstrip("/").rsplit("/", 1)[-1].replace("-", " ").capitalize()
+        return {}
+
+    def meta(*keys):
+        for key in keys:
+            tag = soup.find("meta", property=key) or soup.find("meta", attrs={"name": key})
+            if tag and tag.get("content", "").strip():
+                return tag["content"].strip()
+        return ""
+
+    author = meta("author", "article:author", "parsely-author")
+    if author.startswith("http"):  # some sites put a profile URL here
+        author = ""
+    if not author:  # fall back to structured data: {"author": {"@type": "Person", "name": ...}}
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+            except ValueError:
+                continue
+            for obj in data if isinstance(data, list) else [data]:
+                people = obj.get("author") if isinstance(obj, dict) else None
+                people = people if isinstance(people, list) else [people]
+                names = [p["name"] for p in people if isinstance(p, dict) and p.get("@type") == "Person" and p.get("name")]
+                if names:
+                    author = ", ".join(names)
+                    break
+            if author:
+                break
+
+    published = None
+    raw_date = meta("article:published_time", "datePublished")
+    if raw_date:
+        try:
+            published = datetime.fromisoformat(re.sub(r"([+-]\d\d)(\d\d)$", r"\1:\2", raw_date))
+        except ValueError:
+            pass
+
+    return {
+        "title": meta("og:title") or (soup.title.string.strip() if soup.title and soup.title.string else ""),
+        "summary": meta("og:description", "description"),
+        "image": meta("og:image", "twitter:image"),
+        "author": author,
+        "published": published,
+    }
 
 
-def send_telegram(text, thread_id=None):
-    """thread_id: group topic to post in; defaults to TELEGRAM_THREAD_ID."""
-    thread_id = str(thread_id or os.environ.get("TELEGRAM_THREAD_ID", "")).strip()
-    if os.environ.get("DRY_RUN") == "1":
-        print(f"[dry run, topic {thread_id or '-'}]", text.replace("\n", " | "))
-        return
+def enrich(item, source):
+    """Fill in whatever the feed left out (photo, summary, author, date) from the article page."""
+    item = {"summary": "", "author": "", "published": None, "image": "", **item}
+    if source.get("fetch_page", True):
+        page = page_meta(item["link"])
+        item["image"] = page.get("image") or item["image"]  # page images are usually larger
+        for key in ("title", "summary", "author", "published"):
+            item[key] = item[key] or page.get(key)
+    item["title"] = item["title"] or item["link"].rstrip("/").rsplit("/", 1)[-1].replace("-", " ").capitalize()
+    item["author"] = source.get("author") or item["author"] or source["name"]
+    return item
+
+
+# Dates are shown in Singapore time.
+LOCAL_TZ = timezone(timedelta(hours=8))
+# Telegram caps photo captions at 1024 characters.
+CAPTION_LIMIT = 1024
+
+
+def format_post(item, source):
+    """Same layout as rss.app: linked headline, summary, then 'Author | site • Mon D, YYYY'."""
+    domain = source.get("domain") or urlparse(item["link"]).netloc.removeprefix("www.")
+    when = item["published"] or datetime.now(timezone.utc)
+    when = when.astimezone(LOCAL_TZ)
+    footer = f"{item['author']} | {domain} • {when:%b} {when.day}, {when.year}"
+    head = f'<a href="{html.escape(item["link"], quote=True)}">{html.escape(item["title"])}</a>'
+
+    summary = item["summary"]
+    if summary == item["title"]:
+        summary = ""
+    room = CAPTION_LIMIT - len(item["title"]) - len(footer) - 10
+    if len(summary) > room:
+        summary = summary[: max(0, room - 1)].rsplit(" ", 1)[0] + "…"
+    parts = [head] + ([html.escape(summary)] if summary else []) + [html.escape(footer)]
+    return "\n\n".join(parts)
+
+
+def telegram(method, thread_id=None, files=None, **fields):
+    """Call the Bot API, retrying when rate-limited. thread_id defaults to TELEGRAM_THREAD_ID."""
     token = os.environ["TELEGRAM_BOT_TOKEN"]
-    payload = {"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text, "parse_mode": "HTML"}
+    fields["chat_id"] = os.environ["TELEGRAM_CHAT_ID"]
+    thread_id = str(thread_id or os.environ.get("TELEGRAM_THREAD_ID", "")).strip()
     if thread_id:
-        payload["message_thread_id"] = int(thread_id)
+        fields["message_thread_id"] = int(thread_id)
     for _ in range(3):
-        resp = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json=payload,
-            timeout=30,
-        )
+        url = f"https://api.telegram.org/bot{token}/{method}"
+        if files:
+            resp = requests.post(url, data={k: json.dumps(v) if isinstance(v, dict) else v for k, v in fields.items()},
+                                 files=files, timeout=60)
+        else:
+            resp = requests.post(url, json=fields, timeout=60)
         if resp.status_code == 429:
             time.sleep(resp.json().get("parameters", {}).get("retry_after", 5) + 1)
             continue
-        resp.raise_for_status()
+        return resp
+    return resp
+
+
+def send_telegram(text, thread_id=None, image=None):
+    """Send a post: as a photo with caption when there's an image, otherwise as text."""
+    if os.environ.get("DRY_RUN") == "1":
+        print(f"[dry run, topic {thread_id or os.environ.get('TELEGRAM_THREAD_ID', '-')}, image {image or '-'}]\n{text}\n")
         return
+    if image:
+        resp = telegram("sendPhoto", thread_id, photo=image, caption=text, parse_mode="HTML")
+        if resp.ok:
+            return
+        # Telegram couldn't fetch the image itself (blocked or odd format): download and upload it.
+        try:
+            img = fetch(image)
+            resp = telegram("sendPhoto", thread_id, files={"photo": ("image.jpg", img.content)},
+                            caption=text, parse_mode="HTML")
+            if resp.ok:
+                return
+        except requests.RequestException:
+            pass
+        print(f"  photo failed, sending as text: {resp.text[:200]}", file=sys.stderr)
+    resp = telegram("sendMessage", thread_id, text=text, parse_mode="HTML",
+                    link_preview_options={"is_disabled": True})
     resp.raise_for_status()
 
 
@@ -199,14 +310,9 @@ def main():
         print(f"[{name}] {len(items)} items, {len(new)} new, sending {len(to_send)}")
 
         for item in to_send:
-            title = item["title"] or page_title(item["link"])
-            text = (
-                f"<b>{html.escape(name)}</b>\n"
-                f"{html.escape(title)}\n"
-                f'<a href="{html.escape(item["link"], quote=True)}">Read more</a>'
-            )
+            item = enrich(item, source)
             try:
-                send_telegram(text, source.get("topic_id"))
+                send_telegram(format_post(item, source), source.get("topic_id"), item["image"])
                 source_seen[item["id"]] = now
             except requests.RequestException as exc:
                 # Left unmarked, so it is retried next run.
