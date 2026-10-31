@@ -6,7 +6,6 @@ Checks news sites every 15 minutes and posts new articles to Telegram. Runs free
 |---|---|
 | SBR Insurance | Reads https://sbr.com.sg/insurance (no feed for this section) |
 | Al Jazeera | Official RSS feed |
-| Reuters | Google News search for `site:reuters.com` (Reuters has no public RSS). Posts have no photo or summary |
 | Yahoo Finance SG | Official RSS feed (top stories) |
 
 Sources are listed in [sources.yaml](sources.yaml). Edit that file to add or remove sites.

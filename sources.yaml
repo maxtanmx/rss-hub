@@ -20,18 +20,6 @@ sources:
     type: rss
     url: https://www.aljazeera.com/xml/rss/all.xml
 
-  # Reuters has no public RSS and blocks bots, so we use a Google News search instead.
-  # Narrow it with e.g. site:reuters.com/business or site:reuters.com/world
-  - name: Reuters
-    type: rss
-    url: https://news.google.com/rss/search?q=site:reuters.com+when:1d&hl=en-SG&gl=SG&ceid=SG:en
-    strip_title_suffix: ' - Reuters'
-    # Reuters pages block automated readers, so these posts have no photo or summary.
-    fetch_page: false
-    summary: false
-    author: Reuters
-    domain: reuters.com
-
   - name: Yahoo Finance SG
     type: rss
     url: https://sg.finance.yahoo.com/rss/topstories
