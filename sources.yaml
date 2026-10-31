@@ -1,0 +1,27 @@
+# Each source is checked on every run. New items are sent to Telegram.
+#
+# type: rss     -> a normal RSS/Atom feed
+# type: scrape  -> reads a web page and picks out article links matching `link_pattern`
+#
+# To add a site with an RSS feed, copy one of the rss entries and change name + url.
+
+sources:
+  - name: SBR Insurance
+    type: scrape
+    url: https://sbr.com.sg/insurance
+    link_pattern: '^https://sbr\.com\.sg/insurance/[a-z-]+/[a-z0-9-]+$'
+
+  - name: Al Jazeera
+    type: rss
+    url: https://www.aljazeera.com/xml/rss/all.xml
+
+  # Reuters has no public RSS and blocks bots, so we use a Google News search instead.
+  # Narrow it with e.g. site:reuters.com/business or site:reuters.com/world
+  - name: Reuters
+    type: rss
+    url: https://news.google.com/rss/search?q=site:reuters.com+when:1d&hl=en-SG&gl=SG&ceid=SG:en
+    strip_title_suffix: ' - Reuters'
+
+  - name: Yahoo Finance SG
+    type: rss
+    url: https://sg.finance.yahoo.com/rss/topstories
